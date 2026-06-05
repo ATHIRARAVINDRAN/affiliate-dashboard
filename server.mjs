@@ -20,6 +20,9 @@ const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASS = process.env.ADMIN_PASS || '';
 const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 const DATA_FILE = process.env.DATA_FILE || path.join(process.cwd(), 'data', 'clicks.ndjson');
+// Static sites (no server) can POST clicks client-side; we accept those by Origin
+// instead of a token (so no secret is exposed in browser code).
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 
 fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
 
@@ -120,13 +123,25 @@ function readBody(req) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  const origin = req.headers['origin'] || '';
+  const corsOk = ALLOWED_ORIGINS.includes(origin);
   try {
     if (url.pathname === '/health') { res.writeHead(200); return res.end('ok'); }
 
+    // CORS preflight for browser beacons from allowed origins
+    if (url.pathname === '/collect' && req.method === 'OPTIONS') {
+      res.writeHead(corsOk ? 204 : 403, corsOk ? {
+        'access-control-allow-origin': origin,
+        'access-control-allow-methods': 'POST',
+        'access-control-allow-headers': 'content-type',
+      } : {});
+      return res.end();
+    }
+
     if (url.pathname === '/collect' && req.method === 'POST') {
-      if (INGEST_TOKEN && req.headers['x-ingest-token'] !== INGEST_TOKEN) {
-        res.writeHead(403); return res.end('forbidden');
-      }
+      const tokenOk = INGEST_TOKEN && req.headers['x-ingest-token'] === INGEST_TOKEN;
+      if (!tokenOk && !corsOk) { res.writeHead(403); return res.end('forbidden'); }
+      if (corsOk) res.setHeader('access-control-allow-origin', origin);
       const body = await readBody(req);
       let ev = {}; try { ev = JSON.parse(body || '{}'); } catch {}
       await appendClick(ev);
