@@ -38,6 +38,10 @@ const CONV_FILE = path.join(DATA_DIR, 'conversions.ndjson');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const GA4_MEASUREMENT_ID = process.env.GA4_MEASUREMENT_ID || '';
 const GA4_API_SECRET = process.env.GA4_API_SECRET || '';
+// Optional per-site routing: {"amsterdamairportto.city":{"measurement_id":"G-..","api_secret":".."}, ...}
+// A row's site is matched first; otherwise the global GA4_MEASUREMENT_ID/SECRET is used.
+const GA4_SITES = (() => { try { return JSON.parse(process.env.GA4_SITES || '{}'); } catch { return {}; } })();
+const GA4_ON = Boolean(GA4_MEASUREMENT_ID && GA4_API_SECRET) || Object.keys(GA4_SITES).length > 0;
 const DEFAULT_CURRENCY = process.env.DEFAULT_CURRENCY || 'EUR';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -233,10 +237,18 @@ function parseConversionCsv(text, { provider, site }) {
 }
 
 /* ───────────────────── GA4 measurement-protocol mirror ─────────────── */
+function ga4Target(site) {
+  const s = GA4_SITES[site];
+  const mid = (s && s.measurement_id) || GA4_MEASUREMENT_ID;
+  const sec = (s && s.api_secret) || GA4_API_SECRET;
+  return mid && sec ? `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(mid)}&api_secret=${encodeURIComponent(sec)}` : null;
+}
 function mirrorToGA4(convRows) {
-  if (!GA4_MEASUREMENT_ID || !GA4_API_SECRET || !convRows.length) return;
-  const url = `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(GA4_MEASUREMENT_ID)}&api_secret=${encodeURIComponent(GA4_API_SECRET)}`;
+  if (!GA4_ON || !convRows.length) return 0;
+  let sent = 0;
   for (const c of convRows) {
+    const url = ga4Target(c.site);
+    if (!url) continue;
     try {
       const body = JSON.stringify({
         client_id: `${Math.floor(Math.random() * 1e10)}.${Math.floor(Date.parse(c.date) / 1000) || Math.floor(Date.now() / 1000)}`,
@@ -250,8 +262,10 @@ function mirrorToGA4(convRows) {
         }],
       });
       fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body }).catch(() => {});
+      sent++;
     } catch {}
   }
+  return sent;
 }
 
 /* ───────────────────────────── aggregation ────────────────────────── */
@@ -483,7 +497,7 @@ const server = http.createServer(async (req, res) => {
       const totals = parsed.rows.reduce((a, r) => ({ bookings: a.bookings + r.bookings, revenue: a.revenue + r.revenue, commission: a.commission + r.commission }), { bookings: 0, revenue: 0, commission: 0 });
       if (dryRun) return json(res, 200, { ok: true, dryRun: true, count: parsed.rows.length, columns: parsed.columns, header: parsed.header, totals: { bookings: totals.bookings, revenue: round2(totals.revenue), commission: round2(totals.commission) }, currency: parsed.rows[0].currency, sample: parsed.rows.slice(0, 8) });
       await fsp.appendFile(CONV_FILE, parsed.rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
-      let mirrored = 0; if (GA4_MEASUREMENT_ID && GA4_API_SECRET) { mirrorToGA4(parsed.rows); mirrored = parsed.rows.length; }
+      const mirrored = GA4_ON ? mirrorToGA4(parsed.rows) : 0;
       return json(res, 200, { ok: true, count: parsed.rows.length, columns: parsed.columns, mirroredToGA4: mirrored, totals: { bookings: totals.bookings, revenue: round2(totals.revenue), commission: round2(totals.commission) } });
     }
 
@@ -522,7 +536,7 @@ const server = http.createServer(async (req, res) => {
         clicks: { target: config.goalClicks || 0, current: mClk.total, pct: config.goalClicks ? Math.min(100, Math.round((mClk.total / config.goalClicks) * 100)) : null },
         revenue: { target: config.goalRevenue || 0, current: round2(mConv.commission || mConv.revenue), pct: config.goalRevenue ? Math.min(100, Math.round(((mConv.commission || mConv.revenue) / config.goalRevenue) * 100)) : null },
       };
-      data.gaMirror = Boolean(GA4_MEASUREMENT_ID && GA4_API_SECRET);
+      data.gaMirror = GA4_ON;
       return json(res, 200, data);
     }
 
@@ -533,4 +547,4 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404); res.end('not found');
   } catch (e) { res.writeHead(500); res.end('error'); }
 });
-server.listen(PORT, () => console.log(`affiliate-dashboard on :${PORT} (data dir: ${DATA_DIR}, GA4 mirror: ${GA4_MEASUREMENT_ID ? 'on' : 'off'})`));
+server.listen(PORT, () => console.log(`affiliate-dashboard on :${PORT} (data dir: ${DATA_DIR}, GA4 mirror: ${GA4_ON ? 'on' : 'off'})`));
