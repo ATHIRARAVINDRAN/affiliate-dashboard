@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Affiliate Analytics — Mission Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Spline+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#070a0f; --bg2:#0b0f17; --panel:#0e131d; --panel2:#121826; --raise:#161d2c;
+  --line:#1b2436; --line2:#27324a; --txt:#eaf0f7; --mut:#8793a8; --mut2:#566074;
+  --mint:#5ff0c0; --mint-d:#27c79a; --gold:#ffbf66; --gold-d:#e89b3a;
+  --blue:#76b0ff; --red:#ff6f7d; --pink:#ff7bd0;
+  --good:#5ff0c0; --warn:#ffbf66; --bad:#ff6f7d; --info:#76b0ff;
+  --grad:linear-gradient(95deg,#5ff0c0,#76b0ff); --grad-gold:linear-gradient(95deg,#ffbf66,#ff7bd0);
+  --shadow:0 18px 50px -22px rgba(0,0,0,.9);
+}
+*{box-sizing:border-box}
+html{scrollbar-color:var(--line2) transparent}
+body{
+  margin:0;color:var(--txt);font-family:"Spline Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  background:
+    radial-gradient(1100px 620px at 88% -8%,rgba(95,240,192,.10),transparent 60%),
+    radial-gradient(900px 560px at 8% 4%,rgba(118,176,255,.09),transparent 55%),
+    linear-gradient(180deg,var(--bg2),var(--bg));
+  background-attachment:fixed;
+}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;
+  background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:44px 44px;-webkit-mask-image:radial-gradient(circle at 50% 0,#000,transparent 80%)}
+.mono{font-family:"Spline Sans Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.disp{font-family:"Bricolage Grotesque","Spline Sans",sans-serif}
+a{color:var(--mint);text-decoration:none}
+a:hover{text-decoration:underline}
+
+header{position:sticky;top:0;z-index:30;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+  padding:12px 22px;background:rgba(7,10,15,.78);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:11px}
+.brand .logo{width:30px;height:30px;border-radius:9px;background:var(--grad);position:relative;box-shadow:0 0 22px rgba(95,240,192,.4)}
+.brand .logo::after{content:"";position:absolute;inset:6px;border-radius:4px;border:2px solid rgba(7,10,15,.85);border-right-color:transparent;transform:rotate(-20deg)}
+.brand b{font-family:"Bricolage Grotesque";font-weight:800;font-size:17px;letter-spacing:-.01em}
+.brand span{display:block;font-size:10px;color:var(--mut2);letter-spacing:.16em;text-transform:uppercase;margin-top:-2px}
+.sp{flex:1}
+.ctl{display:flex;align-items:center;gap:8px}
+label.fld{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+select,button,input{font:inherit;color:var(--txt);background:var(--panel2);border:1px solid var(--line2);border-radius:11px;padding:8px 12px}
+select,button{cursor:pointer}
+button:hover{border-color:var(--mint-d)}
+input:focus,select:focus{outline:none;border-color:var(--mint-d)}
+.seg{display:flex;background:var(--panel2);border:1px solid var(--line2);border-radius:11px;overflow:hidden;padding:2px}
+.seg button{border:0;background:transparent;color:var(--mut);padding:6px 12px;border-radius:8px}
+.seg button.on{background:var(--grad);color:#04140f;font-weight:700}
+.btn-pri{background:var(--grad);color:#04140f;border:0;font-weight:700}
+.btn-pri:hover{filter:brightness(1.06)}
+.btn-ghost{background:transparent}
+.danger{background:transparent;border-color:#5a2230;color:#ffa6ad}
+.danger:hover{background:#23121a;border-color:#7a2e3c}
+
+main{position:relative;z-index:1;max-width:1340px;margin:0 auto;padding:22px}
+.section-t{font-family:"Bricolage Grotesque";font-weight:700;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);margin:26px 4px 12px;display:flex;align-items:center;gap:10px}
+.section-t::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
+
+/* KPI cards */
+.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+@media(max-width:1100px){.kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:620px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpi{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:18px;padding:16px;position:relative;overflow:hidden;box-shadow:var(--shadow)}
+.kpi .top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.kpi .lbl{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+.kpi .val{font-family:"Bricolage Grotesque";font-weight:800;font-size:27px;letter-spacing:-.02em;line-height:1}
+.kpi .val small{font-size:14px;color:var(--mut);font-weight:600}
+.kpi .spark{position:absolute;right:0;bottom:0;left:0;height:34px;opacity:.6}
+.kpi .sub{font-size:11.5px;color:var(--mut2);margin-top:7px;position:relative}
+.kpi.gold .val{color:var(--gold)}
+.delta{display:inline-flex;align-items:center;gap:3px;font-size:11.5px;font-weight:600;padding:2px 7px;border-radius:999px;border:1px solid transparent}
+.delta.up{color:#062;background:rgba(95,240,192,.12);border-color:rgba(95,240,192,.3);color:var(--mint)}
+.delta.down{color:var(--red);background:rgba(255,111,125,.1);border-color:rgba(255,111,125,.28)}
+.delta.flat{color:var(--mut2);background:var(--panel2)}
+.nudge{display:inline-block;font-size:11px;color:var(--gold);cursor:pointer;border-bottom:1px dashed var(--gold-d)}
+
+/* Insights */
+.cues{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.cue{display:flex;gap:12px;background:var(--panel);border:1px solid var(--line);border-left-width:3px;border-radius:14px;padding:13px 15px}
+.cue .ic{font-size:18px;line-height:1.2}
+.cue h4{margin:0 0 3px;font-size:13.5px;font-family:"Bricolage Grotesque";font-weight:700}
+.cue p{margin:0;font-size:12.5px;color:var(--mut)}
+.cue.good{border-left-color:var(--good)} .cue.warn{border-left-color:var(--warn)}
+.cue.bad{border-left-color:var(--bad)} .cue.info{border-left-color:var(--info)}
+
+/* layout grids */
+.grid{display:grid;gap:14px}
+.g-2{grid-template-columns:2fr 1fr}.g-3{grid-template-columns:repeat(3,1fr)}.g-4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:980px){.g-2,.g-3,.g-4{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:16px 18px;box-shadow:var(--shadow)}
+.panel h3{margin:0 0 14px;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
+.panel h3 .c{margin-left:auto;color:var(--mut2);font-weight:600;font-size:11px}
+
+/* bars */
+.bar{display:grid;grid-template-columns:1fr 52px;gap:10px;align-items:center;margin:6px 0}
+.bar .t{position:relative;height:24px;background:#0a0e16;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.bar .f{position:absolute;inset:0;width:var(--w);background:var(--grad);opacity:.8;border-radius:7px}
+.bar .lab{position:absolute;left:9px;top:0;line-height:24px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90%}
+.bar .c{font-family:"Spline Sans Mono";font-size:12.5px;color:var(--mut);text-align:right}
+.empty{color:var(--mut2);font-size:12.5px;padding:10px 0;text-align:center}
+
+/* tables */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;user-select:none}
+th.num,td.num{text-align:right;font-family:"Spline Sans Mono"}
+tbody tr:hover{background:var(--panel2)}
+.pill{background:var(--panel2);border:1px solid var(--line2);border-radius:999px;padding:2px 9px;font-size:11px}
+.scroll{overflow:auto;max-height:430px}
+.mut{color:var(--mut)}.gold{color:var(--gold)}
+
+/* heatmap */
+.heat{display:grid;grid-template-columns:34px repeat(24,1fr);gap:3px;align-items:center}
+.heat .hd{font-size:9px;color:var(--mut2);text-align:center;font-family:"Spline Sans Mono"}
+.heat .rl{font-size:10px;color:var(--mut);font-family:"Spline Sans Mono"}
+.heat .cell{aspect-ratio:1;border-radius:3px;background:#0c111b}
+
+/* goals */
+.goal{margin:10px 0}
+.goal .row{display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px}
+.goal .track{height:9px;border-radius:999px;background:#0a0e16;border:1px solid var(--line);overflow:hidden}
+.goal .fill{height:100%;background:var(--grad)}
+.goal.gold .fill{background:var(--grad-gold)}
+
+/* modal */
+.modal{position:fixed;inset:0;z-index:60;display:none;align-items:flex-start;justify-content:center;padding:40px 16px;background:rgba(3,5,9,.7);backdrop-filter:blur(4px);overflow:auto}
+.modal.on{display:flex}
+.sheet{width:min(680px,100%);background:var(--panel);border:1px solid var(--line2);border-radius:20px;padding:22px;box-shadow:var(--shadow)}
+.sheet h2{margin:0 0 4px;font-family:"Bricolage Grotesque";font-weight:800;font-size:20px}
+.sheet p.lead{margin:0 0 16px;color:var(--mut);font-size:13px}
+.sheet .field{margin:12px 0}
+.sheet label{display:block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:6px}
+.sheet input[type=text],.sheet input[type=number],.sheet textarea,.sheet select{width:100%}
+.sheet textarea{min-height:120px;font-family:"Spline Sans Mono";font-size:12px;resize:vertical}
+.sheet .actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.preview{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;font-size:12px;margin-top:12px}
+.preview .k{color:var(--mint)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.x{cursor:pointer;color:var(--mut);font-size:20px;line-height:1;float:right}
+.foot{margin:34px 4px 10px;color:var(--mut2);font-size:11.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.dotsep{width:3px;height:3px;border-radius:50%;background:var(--mut2)}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(20px);z-index:80;background:var(--raise);border:1px solid var(--line2);border-radius:12px;padding:11px 18px;font-size:13px;opacity:0;transition:.25s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.bad{border-color:#7a2e3c}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo"></div><div><b>Affiliate Analytics</b><span>Mission Control</span></div></div>
+  <span class="sp"></span>
+  <div class="ctl">
+    <label class="fld">Project <select id="site"><option value="">All projects</option></select></label>
+    <div class="seg" id="range">
+      <button data-d="7">7D</button><button data-d="30" class="on">30D</button><button data-d="90">90D</button><button data-d="0">All</button>
+    </div>
+    <button class="btn-ghost" id="goalsBtn" title="Set goals">🎯</button>
+    <button class="btn-ghost" id="exportBtn" title="Export CSV">⤓</button>
+    <button class="btn-pri" id="importBtn">＋ Import GYG</button>
+    <button class="btn-ghost" id="refresh" title="Refresh">↻</button>
+    <button class="danger" id="reset" title="Clear data">Clear</button>
+  </div>
+</header>
+
+<main id="app"><p class="mut" style="padding:40px;text-align:center">Loading mission control…</p></main>
+
+<!-- Import modal -->
+<div class="modal" id="importModal">
+  <div class="sheet">
+    <span class="x" data-close>×</span>
+    <h2>Import conversions</h2>
+    <p class="lead">GetYourGuide has no click-level API, so paste or upload your <b>Partner Portal CSV export</b>. Columns are auto-detected (date, product, bookings, revenue, commission, currency).</p>
+    <div class="row2">
+      <div class="field"><label>Provider</label><input type="text" id="impProvider" value="getyourguide"></div>
+      <div class="field"><label>Project (optional — leave blank for all)</label>
+        <select id="impSite"><option value="">— all / unassigned —</option></select></div>
+    </div>
+    <div class="field">
+      <label>CSV data</label>
+      <input type="file" id="impFile" accept=".csv,text/csv" style="margin-bottom:8px">
+      <textarea id="impText" placeholder="date,product,bookings,revenue,commission,currency&#10;2026-06-01,Colosseum Skip-the-line,3,189.00,17.01,EUR"></textarea>
+    </div>
+    <div id="impPreview"></div>
+    <div class="actions">
+      <button class="btn-ghost" id="impPreviewBtn">Preview</button>
+      <button class="btn-pri" id="impConfirm" disabled>Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- Goals modal -->
+<div class="modal" id="goalsModal">
+  <div class="sheet">
+    <span class="x" data-close>×</span>
+    <h2>Monthly targets</h2>
+    <p class="lead">Set month-to-date goals. The dashboard shows pacing against them.</p>
+    <div class="row2">
+      <div class="field"><label>Clicks / month</label><input type="number" id="goalClicks" min="0" placeholder="e.g. 5000"></div>
+      <div class="field"><label>Commission / month</label><input type="number" id="goalRevenue" min="0" placeholder="e.g. 800"></div>
+    </div>
+    <div class="actions"><button class="btn-ghost" data-close>Cancel</button><button class="btn-pri" id="goalSave">Save</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+let RANGE=30, DATA=null, SITES=[];
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtN=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0});
+const fmtM=(n,c)=>(c||'')+' '+Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+function toast(msg,bad){const t=$('#toast');t.textContent=msg;t.className='toast on'+(bad?' bad':'');setTimeout(()=>t.className='toast',2600);}
+
+function deltaChip(d){
+  if(d==null) return '<span class="delta flat">– vs prev</span>';
+  const up=d>=0, sign=up?'▲':'▼', cls=up?'up':'down';
+  // "down clicks" bad, "down" good only contextually; keep semantic: up=green
+  return '<span class="delta '+cls+'">'+sign+' '+Math.abs(d).toFixed(d>=10||d<=-10?0:1)+'%</span>';
+}
+function spark(series,color){
+  const v=series||[]; if(v.length<2) return '';
+  const mx=Math.max(...v,1), mn=Math.min(...v,0), span=mx-mn||1, W=200,H=34;
+  const pts=v.map((y,i)=>[ (i/(v.length-1))*W, H-2-((y-mn)/span)*(H-4) ]);
+  const line=pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+  const area=line+' '+W+','+H+' 0,'+H;
+  const id='g'+Math.random().toString(36).slice(2,7);
+  return '<svg class="spark" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+
+    '<defs><linearGradient id="'+id+'" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="'+color+'" stop-opacity=".35"/><stop offset="1" stop-color="'+color+'" stop-opacity="0"/></linearGradient></defs>'+
+    '<polygon points="'+area+'" fill="url(#'+id+')"/>'+
+    '<polyline points="'+line+'" fill="none" stroke="'+color+'" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+}
+function kpi(opts){
+  const {label,val,sub,delta,sparkSeries,color,gold,locked}=opts;
+  return '<div class="kpi'+(gold?' gold':'')+'">'+
+    '<div class="top"><span class="lbl">'+label+'</span>'+(delta!==undefined?deltaChip(delta):'')+'</div>'+
+    '<div class="val">'+(locked?'<small>—</small>':val)+'</div>'+
+    '<div class="sub">'+(locked?'<span class="nudge" data-import>Import GYG CSV →</span>':(sub||''))+'</div>'+
+    (sparkSeries&&!locked?spark(sparkSeries,color||'#5ff0c0'):'')+'</div>';
+}
+function bars(items,money){
+  if(!items||!items.length) return '<div class="empty">No data</div>';
+  const mx=Math.max(...items.map(i=>i.count),1);
+  return items.map(i=>'<div class="bar"><div class="t"><div class="f" style="--w:'+(i.count/mx*100)+'%"></div><span class="lab">'+esc(i.key||'(none)')+'</span></div><span class="c">'+fmtN(i.count)+'</span></div>').join('');
+}
+function panel(title,inner,count){return '<div class="panel"><h3>'+title+(count!=null?'<span class="c">'+count+'</span>':'')+'</h3>'+inner+'</div>';}
+
+function trendChart(byDay){
+  if(!byDay||byDay.length<2) return '<div class="empty">Not enough data for a trend yet</div>';
+  const W=900,H=210,pad=8;
+  const clk=byDay.map(d=>d.clicks), conv=byDay.map(d=>d.conversions);
+  const mxC=Math.max(...clk,1), mxV=Math.max(...conv,1);
+  const x=i=>pad+(i/(byDay.length-1))*(W-2*pad);
+  const yC=v=>H-18-(v/mxC)*(H-30);
+  const lineClk=byDay.map((d,i)=>x(i).toFixed(1)+','+yC(d.clicks).toFixed(1)).join(' ');
+  const areaClk=lineClk+' '+x(byDay.length-1).toFixed(1)+','+(H-18)+' '+pad+','+(H-18);
+  const hasConv=conv.some(v=>v>0);
+  const yV=v=>H-18-(v/mxV)*(H-30);
+  const lineConv=byDay.map((d,i)=>x(i).toFixed(1)+','+yV(d.conversions).toFixed(1)).join(' ');
+  const ticks=[0,Math.floor(byDay.length/2),byDay.length-1];
+  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" preserveAspectRatio="none">'+
+    '<defs><linearGradient id="ar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff0c0" stop-opacity=".28"/><stop offset="1" stop-color="#5ff0c0" stop-opacity="0"/></linearGradient></defs>'+
+    [0.25,0.5,0.75,1].map(g=>'<line x1="'+pad+'" x2="'+(W-pad)+'" y1="'+(H-18-g*(H-30))+'" y2="'+(H-18-g*(H-30))+'" stroke="#1b2436" stroke-width="1"/>').join('')+
+    '<polygon points="'+areaClk+'" fill="url(#ar)"/>'+
+    '<polyline points="'+lineClk+'" fill="none" stroke="#5ff0c0" stroke-width="2" stroke-linejoin="round"/>'+
+    (hasConv?'<polyline points="'+lineConv+'" fill="none" stroke="#ffbf66" stroke-width="2" stroke-dasharray="2 3"/>':'')+
+    ticks.map(i=>'<text x="'+x(i)+'" y="'+(H-4)+'" fill="#566074" font-size="10" font-family="Spline Sans Mono" text-anchor="'+(i===0?'start':i===byDay.length-1?'end':'middle')+'">'+byDay[i].key.slice(5)+'</text>').join('')+
+    '</svg>'+
+    '<div class="mut" style="font-size:11px;margin-top:6px"><span style="color:#5ff0c0">— clicks</span>'+(hasConv?' &nbsp; <span style="color:#ffbf66">- - conversions</span>':'')+'</div>';
+}
+function heatmap(hm){
+  if(!hm) return '';
+  const DOW=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  let mx=1; hm.forEach(r=>r.forEach(v=>{if(v>mx)mx=v}));
+  let h='<div class="heat"><div></div>';
+  for(let i=0;i<24;i++) h+='<div class="hd">'+(i%3===0?i:'')+'</div>';
+  hm.forEach((row,d)=>{ h+='<div class="rl">'+DOW[d]+'</div>';
+    row.forEach((v)=>{const a=v/mx; const bg=v?('rgba(95,240,192,'+(0.12+a*0.78).toFixed(3)+')'):'#0c111b';
+      h+='<div class="cell" style="background:'+bg+'" title="'+v+' clicks"></div>';});
+  });
+  return h+'</div><div class="mut" style="font-size:11px;margin-top:8px">Darker = quieter, brighter = busier. Hours in UTC.</div>';
+}
+function perfTable(providers,currency,hasConv){
+  if(!providers||!providers.length) return '<div class="empty">No data</div>';
+  const head='<thead><tr><th data-s="key">Provider</th><th class="num" data-s="clicks">Clicks</th>'+
+    (hasConv?'<th class="num" data-s="conversions">Conv</th><th class="num" data-s="cr">CR%</th><th class="num" data-s="revenue">Revenue</th><th class="num" data-s="commission">Commission</th><th class="num" data-s="epc">EPC</th>':'')+'</tr></thead>';
+  const body=providers.map(p=>'<tr><td><span class="pill">'+esc(p.key)+'</span></td>'+
+    '<td class="num">'+fmtN(p.clicks)+'</td>'+
+    (hasConv?('<td class="num">'+fmtN(p.conversions)+'</td><td class="num">'+p.cr.toFixed(2)+'</td><td class="num">'+fmtM(p.revenue,currency)+'</td><td class="num gold">'+fmtM(p.commission,currency)+'</td><td class="num gold">'+fmtM(p.epc,currency)+'</td>'):'')+'</tr>').join('');
+  return '<div class="scroll"><table id="perf">'+head+'<tbody>'+body+'</tbody></table></div>';
+}
+let perfSort={k:'clicks',dir:-1};
+
+function render(d){
+  DATA=d; const c=d.currency||'';
+  const k=d.kpis, sC=d.byDay.map(x=>x.clicks), sV=d.byDay.map(x=>x.conversions), hasConv=d.hasConversions;
+  const topProv=d.providers[0]?d.providers[0].key:'—';
+  const gp=d.goalProgress||{};
+  let html='';
+
+  // KPI row
+  html+='<div class="kpis">'
+    +kpi({label:'Clicks',val:fmtN(k.clicks.v),delta:k.clicks.delta,sparkSeries:sC,color:'#5ff0c0',sub:RANGE>0?('vs prev '+RANGE+'d'):'all time'})
+    +kpi({label:'Unique visitors',val:fmtN(k.unique.v),delta:k.unique.delta,sparkSeries:sC,color:'#76b0ff',sub:'deduped by GA id'})
+    +kpi({label:'Conversion rate',val:k.cr.v.toFixed(2)+'<small>%</small>',delta:k.cr.delta,locked:!hasConv,color:'#5ff0c0',sub:'benchmark 1–5%'})
+    +kpi({label:'Commission',val:fmtM(k.commission.v,c),delta:k.commission.delta,locked:!hasConv,gold:true,sparkSeries:sV,color:'#ffbf66',sub:'imported'})
+    +kpi({label:'EPC',val:fmtM(k.epc.v,c),delta:k.epc.delta,locked:!hasConv,gold:true,sub:'per click · aim > '+c+' 1'})
+    +kpi({label:'AOV',val:fmtM(k.aov.v,c),delta:k.aov.delta,locked:!hasConv,gold:true,sub:'per booking'})
+    +'</div>';
+
+  // Insights
+  if(d.insights&&d.insights.length){
+    const ICON={good:'✅',warn:'⚠️',bad:'⛔',info:'💡'};
+    html+='<div class="section-t">Insights &amp; cues</div><div class="cues">'+
+      d.insights.map(i=>'<div class="cue '+i.severity+'"><div class="ic">'+(ICON[i.severity]||'•')+'</div><div><h4>'+esc(i.title)+'</h4><p>'+esc(i.text)+'</p></div></div>').join('')+'</div>';
+  }
+
+  // Trend + goals
+  html+='<div class="section-t">Performance</div><div class="grid g-2">'
+    +panel('Clicks &amp; conversions over time',trendChart(d.byDay))
+    +'<div class="panel"><h3>Month-to-date goals</h3>'+goalBlock(gp,c)+'</div>'
+    +'</div>';
+
+  // Provider performance table
+  html+='<div class="grid g-2" style="margin-top:14px">'
+    +panel('Provider performance'+(hasConv?'':' (import for revenue)'),perfTable(d.providers,c,hasConv),d.providers.length)
+    +panel(hasConv?'Top products by bookings':'Top products (clicks)',bars(hasConv&&d.convProducts.length?d.convProducts:d.products))
+    +'</div>';
+
+  // Traffic breakdown
+  html+='<div class="section-t">Audience &amp; traffic</div><div class="grid g-3">'
+    +panel('Landing pages',bars(d.pages),d.pages.length)
+    +panel('Traffic sources',bars(d.sources),d.sources.length)
+    +panel('Countries',bars(d.geo),d.geo.length)
+    +panel('Devices',bars(d.devices))
+    +panel('Browsers',bars(d.browsers))
+    +panel('Operating systems',bars(d.os))
+    +'</div>';
+
+  // Heatmap + hour
+  html+='<div class="grid g-2" style="margin-top:14px">'
+    +panel('When clicks happen (day × hour)',heatmap(d.heatmap))
+    +panel('By hour (UTC)',bars(d.byHour))
+    +'</div>';
+
+  // Recent
+  html+='<div class="section-t">Live feed</div>'
+    +panel('Recent clicks','<div class="scroll"><table><thead><tr><th>Time</th><th>Project</th><th>Provider</th><th>Product</th><th>Device</th><th>Country</th><th>From page</th></tr></thead><tbody>'
+      +(d.recent.length?d.recent.map(r=>'<tr><td class="mut">'+new Date(r.ts).toLocaleString()+'</td><td>'+esc(r.site)+'</td><td><span class="pill">'+esc(r.provider)+'</span></td><td>'+esc(r.product)+'</td><td>'+esc(r.device)+'</td><td>'+esc(r.geo||'—')+'</td><td class="mut">'+esc(r.source_page?pathOf(r.source_page):'')+'</td></tr>').join(''):'<tr><td colspan="7" class="empty">No clicks yet</td></tr>')
+      +'</tbody></table></div>',d.recent.length);
+
+  // footer
+  html+='<div class="foot"><span>'+fmtN(k.clicks.v)+' clicks · '+fmtN(k.bots.v)+' bots excluded</span><span class="dotsep"></span>'
+    +'<span>GA4 mirror: '+(d.gaMirror?'<span style="color:#5ff0c0">on</span>':'off')+'</span><span class="dotsep"></span>'
+    +'<a href="#" id="lookerHelp">Looker Studio template</a><span class="dotsep"></span>'
+    +'<span>Conversions via GYG CSV import</span></div>';
+
+  $('#app').innerHTML=html;
+  // populate site selects
+  if(SITES.length===0 && d.sites.length){SITES=d.sites.map(s=>s.key);
+    [['#site'],['#impSite']].forEach(([sel])=>{const el=$(sel);SITES.forEach(s=>{const o=document.createElement('option');o.value=o.textContent=s;el.appendChild(o)})});}
+  bindPerfSort();
+  $$('[data-import]').forEach(el=>el.onclick=openImport);
+  $('#lookerHelp').onclick=e=>{e.preventDefault();toast('Looker Studio setup guide is in LOOKER_STUDIO.md in the repo');};
+}
+function pathOf(u){try{return new URL(u,'http://x').pathname||'/'}catch{return u}}
+function goalBlock(gp,c){
+  if(!gp.clicks) return '<div class="empty">No targets set. <span class="nudge" id="setGoals">Set monthly goals →</span></div>';
+  const g=(o,gold,unit)=>{const pctv=o.pct==null?0:o.pct;
+    return '<div class="goal'+(gold?' gold':'')+'"><div class="row"><span class="mut">'+(gold?'Commission':'Clicks')+'</span><span class="mono">'+(gold?fmtM(o.current,c):fmtN(o.current))+' / '+(gold?fmtM(o.target,c):fmtN(o.target))+(o.pct!=null?' · '+o.pct+'%':'')+'</span></div><div class="track"><div class="fill" style="width:'+pctv+'%"></div></div></div>';};
+  return g(gp.clicks,false)+(gp.revenue&&gp.revenue.target?g(gp.revenue,true):'');
+}
+function bindPerfSort(){
+  const t=$('#perf'); if(!t) return;
+  t.querySelectorAll('th').forEach(th=>th.onclick=()=>{const k=th.dataset.s;perfSort.dir=perfSort.k===k?-perfSort.dir:-1;perfSort.k=k;
+    DATA.providers.sort((a,b)=>{const x=a[k],y=b[k];return (typeof x==='string'?x.localeCompare(y):x-y)*perfSort.dir});
+    $('#perf').parentElement.outerHTML=perfTable(DATA.providers,DATA.currency,DATA.hasConversions);bindPerfSort();});
+}
+
+async function load(){
+  const p=new URLSearchParams(); const sv=$('#site').value; if(sv)p.set('site',sv);
+  if(RANGE>0){const f=new Date(Date.now()-RANGE*864e5).toISOString().slice(0,10);p.set('from',f);}
+  try{const r=await fetch('/api/stats?'+p);const d=await r.json();render(d);}
+  catch(e){$('#app').innerHTML='<p class="empty">Failed to load stats.</p>';}
+}
+
+/* ── controls ── */
+$('#site').onchange=load; $('#refresh').onclick=load;
+$$('#range button').forEach(b=>b.onclick=()=>{$$('#range button').forEach(x=>x.classList.remove('on'));b.classList.add('on');RANGE=+b.dataset.d;load();});
+$('#reset').onclick=async()=>{if(!confirm('Clear ALL collected click + conversion data? This cannot be undone.'))return;await fetch('/api/reset',{method:'POST'});SITES=[];load();toast('Data cleared');};
+$('#exportBtn').onclick=()=>{const t=confirm('OK = export clicks CSV, Cancel = export conversions CSV')?'clicks':'conversions';window.open('/api/export?type='+t,'_blank');};
+
+/* ── modals ── */
+function show(id){$(id).classList.add('on')} function hide(id){$(id).classList.remove('on')}
+$$('[data-close]').forEach(x=>x.onclick=()=>{x.closest('.modal').classList.remove('on')});
+$$('.modal').forEach(m=>m.onclick=e=>{if(e.target===m)m.classList.remove('on')});
+function openImport(){$('#impPreview').innerHTML='';$('#impConfirm').disabled=true;show('#importModal');}
+$('#importBtn').onclick=openImport;
+
+$('#impFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{$('#impText').value=rd.result;};rd.readAsText(f);};
+function importUrl(dry){const p=new URLSearchParams();p.set('provider',$('#impProvider').value||'getyourguide');const s=$('#impSite').value;if(s)p.set('site',s);if(dry)p.set('dryRun','1');return '/api/import?'+p;}
+$('#impPreviewBtn').onclick=async()=>{
+  const body=$('#impText').value.trim(); if(!body){toast('Paste or upload a CSV first',true);return;}
+  const r=await fetch(importUrl(true),{method:'POST',headers:{'content-type':'text/csv'},body});const d=await r.json();
+  if(!d.ok){$('#impPreview').innerHTML='<div class="preview" style="border-color:#7a2e3c">'+esc(d.error)+(d.header?'<br><span class="mut">Header seen: '+esc(d.header.join(' | '))+'</span>':'')+'</div>';$('#impConfirm').disabled=true;return;}
+  const cols=Object.entries(d.columns).map(([k,v])=>'<span class="k">'+k+'</span>→'+esc(v)).join(' &nbsp; ');
+  $('#impPreview').innerHTML='<div class="preview"><b>'+d.count+' rows</b> · '+d.totals.bookings+' bookings · '+fmtM(d.totals.revenue,d.currency)+' revenue · <span class="gold">'+fmtM(d.totals.commission,d.currency)+' commission</span><br><span class="mut" style="font-size:11px">Mapped: '+cols+'</span></div>';
+  $('#impConfirm').disabled=false;
+};
+$('#impConfirm').onclick=async()=>{
+  const body=$('#impText').value.trim(); const r=await fetch(importUrl(false),{method:'POST',headers:{'content-type':'text/csv'},body});const d=await r.json();
+  if(!d.ok){toast(d.error||'Import failed',true);return;}
+  hide('#importModal');$('#impText').value='';
+  toast('Imported '+d.count+' rows'+(d.mirroredToGA4?' · mirrored '+d.mirroredToGA4+' to GA4':''));load();
+};
+
+/* goals */
+$('#goalsBtn').onclick=async()=>{const c=await (await fetch('/api/config')).json();$('#goalClicks').value=c.goalClicks||'';$('#goalRevenue').value=c.goalRevenue||'';show('#goalsModal');};
+document.addEventListener('click',e=>{if(e.target&&e.target.id==='setGoals')$('#goalsBtn').click();});
+$('#goalSave').onclick=async()=>{await fetch('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({goalClicks:+$('#goalClicks').value||0,goalRevenue:+$('#goalRevenue').value||0})});hide('#goalsModal');load();toast('Targets saved');};
+
+load();
+setInterval(()=>{if(!document.querySelector('.modal.on'))load();},60000); // gentle auto-refresh
+</script>
+</body>
+</html>
