@@ -110,6 +110,31 @@ test('login form creates a session that protects the dashboard and API, then log
   assert.equal((await jsonResponse(base, '/api/stats', { headers: { cookie } })).response.status, 401);
 });
 
+test('opaque Origin login works only for a same-origin browser navigation', async (t) => {
+  const { base } = await startDashboard(t);
+  const body = new URLSearchParams({ username: 'test-admin', password: 'test-password' });
+  const headers = { origin: 'null', 'content-type': 'application/x-www-form-urlencoded' };
+  const allowed = await fetch(`${base}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { ...headers, 'sec-fetch-site': 'same-origin' }, body,
+  });
+  assert.equal(allowed.status, 303);
+  assert.equal(allowed.headers.get('location'), '/');
+  assert.match(allowed.headers.get('set-cookie') || '', /^affiliate_session=/);
+
+  const denied = await fetch(`${base}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { ...headers, 'sec-fetch-site': 'cross-site' }, body,
+  });
+  assert.equal(denied.status, 403);
+
+  const mismatched = await fetch(`${base}/login`, {
+    method: 'POST', redirect: 'manual',
+    headers: { ...headers, origin: 'https://other.example', 'sec-fetch-site': 'same-origin' }, body,
+  });
+  assert.equal(mismatched.status, 403);
+});
+
 test('CSV orders are idempotent and a matching click ID gives exact attribution', async (t) => {
   const { base } = await startDashboard(t);
   const cookie = await login(base);

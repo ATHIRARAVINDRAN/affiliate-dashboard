@@ -84,6 +84,8 @@ function authed(req) {
 function sameOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return true; // CLI clients have no Origin header.
+  // Embedded browsers can send an opaque Origin for a same-origin form navigation.
+  if (origin === 'null') return req.headers['sec-fetch-site'] === 'same-origin';
   try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 function sessionCookie(req, token, age) {
