@@ -1,26 +1,25 @@
 /**
  * affiliate-dashboard — centralized affiliate analytics for every site.
- * Zero runtime dependencies (Node http + NDJSON/JSON file store). Basic-auth UI.
+ * Zero runtime dependencies (Node http + NDJSON/JSON file store).
  *
  *   POST /collect          ingest a click       (ingest token OR allowed-origin)
- *   GET  /api/stats        aggregated JSON       (Basic Auth)
- *   POST /api/import       import GYG CSV export  (Basic Auth; ?dryRun=1 to preview)
- *   GET  /api/config       read goals/targets    (Basic Auth)
- *   POST /api/config       write goals/targets   (Basic Auth)
- *   GET  /api/export       CSV export            (Basic Auth; ?type=clicks|conversions)
- *   POST /api/reset        clear all data        (Basic Auth)
- *   GET  /                 dashboard UI          (Basic Auth)
+ *   GET  /api/stats        aggregated JSON       (session)
+ *   POST /api/import       import partner CSV     (session; ?dryRun=1 to preview)
+ *   GET  /api/config       read goals/targets    (session)
+ *   POST /api/config       write goals/targets   (session)
+ *   GET  /api/export       CSV export            (session; ?type=clicks|conversions)
+ *   POST /api/reset        clear all data        (session)
+ *   GET  /                 dashboard UI          (session)
  *   GET  /health           liveness
  *
- * Conversions/revenue come from CSV import (GetYourGuide has no click-level API).
- * When GA4_MEASUREMENT_ID + GA4_API_SECRET are set, imported conversions are also
- * mirrored to GA4 via the Measurement Protocol so Google is a 2nd source of truth.
+ * Tiqets orders sync from the reporting API. Other partner reports can be imported.
  *
  * Env: PORT, ADMIN_USER, ADMIN_PASS, INGEST_TOKEN, ALLOWED_ORIGINS, DATA_FILE,
- *      GA4_MEASUREMENT_ID, GA4_API_SECRET, DEFAULT_CURRENCY
+ *      GA4_MEASUREMENT_ID, GA4_API_SECRET, DEFAULT_CURRENCY,
+ *      TIQETS_API_TOKEN or TIQETS_API_TOKEN_FILE
  */
 import http from 'node:http';
-import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { timingSafeEqual, randomUUID, randomBytes, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -43,29 +42,57 @@ const GA4_API_SECRET = process.env.GA4_API_SECRET || '';
 const GA4_SITES = (() => { try { return JSON.parse(process.env.GA4_SITES || '{}'); } catch { return {}; } })();
 const GA4_ON = Boolean(GA4_MEASUREMENT_ID && GA4_API_SECRET) || Object.keys(GA4_SITES).length > 0;
 const DEFAULT_CURRENCY = process.env.DEFAULT_CURRENCY || 'EUR';
+const TIQETS_API_TOKEN_FILE = process.env.TIQETS_API_TOKEN_FILE || '/data/tiqets-token';
+function tiqetsToken() {
+  if (process.env.TIQETS_API_TOKEN) return process.env.TIQETS_API_TOKEN;
+  try { return fs.readFileSync(TIQETS_API_TOKEN_FILE, 'utf8').trim(); }
+  catch { return ''; }
+}
+const TIQETS_API_BASE_URL = process.env.TIQETS_API_BASE_URL || 'https://api.tiqets.com/v2';
+const TIQETS_SYNC_START_DATE = process.env.TIQETS_SYNC_START_DATE || '2026-06-01';
+const TIQETS_SITE = process.env.TIQETS_SITE || '';
+const SYNC_FILE = path.join(DATA_DIR, 'sync.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DASHBOARD_HTML = (() => {
   try { return fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8'); }
   catch { return '<!doctype html><title>Affiliate Analytics</title><p>dashboard.html missing</p>'; }
 })();
+const LOGIN_HTML = fs.readFileSync(path.join(__dirname, 'login.html'), 'utf8');
 
 /* ─────────────────────────────── auth ─────────────────────────────── */
 const eq = (a, b) => {
   const x = Buffer.from(String(a)); const y = Buffer.from(String(b));
   return x.length === y.length && timingSafeEqual(x, y);
 };
+const SESSION_COOKIE = 'affiliate_session';
+const SESSION_MS = 30 * 86400000;
+const sessions = new Map();
+const loginFailures = new Map();
+function cookie(req, name) {
+  const item = (req.headers.cookie || '').split(';').map((v) => v.trim()).find((v) => v.startsWith(name + '='));
+  return item ? item.slice(name.length + 1) : '';
+}
 function authed(req) {
-  if (!ADMIN_PASS) return true;
-  const h = req.headers['authorization'] || '';
-  if (!h.startsWith('Basic ')) return false;
-  const [u, p] = Buffer.from(h.slice(6), 'base64').toString('utf8').split(':');
-  return eq(u, ADMIN_USER) && eq(p, ADMIN_PASS);
+  if (!ADMIN_PASS) return false;
+  const token = cookie(req, SESSION_COOKIE);
+  const expires = sessions.get(token);
+  if (!expires) return false;
+  if (expires <= Date.now()) { sessions.delete(token); return false; }
+  return true;
+}
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // CLI clients have no Origin header.
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
+function sessionCookie(req, token, age) {
+  const secure = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https';
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secure ? '; Secure' : ''}`;
 }
 function requireAuth(req, res) {
   if (authed(req)) return true;
-  res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Affiliate Dashboard"' });
-  res.end('Authentication required');
+  json(res, 401, { ok: false, error: 'Session expired. Sign in again.' });
   return false;
 }
 
@@ -99,6 +126,7 @@ async function appendClick(ev, req) {
   const ip = (req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim();
   const row = {
     ts: new Date().toISOString(),
+    click_id: ev.click_id || randomUUID(),
     site: ev.site || '',
     provider: ev.affiliate_provider || ev.provider || '',
     product: ev.affiliate_product || ev.product || '',
@@ -176,13 +204,19 @@ function parseNum(s) {
   return Number.isFinite(n) ? n : 0;
 }
 const COLMAP = {
-  date: /date|day|month|period/i,
+  date: /^(?:order|booking|checkout)?\s*date$|^day$|^period$/i,
   product: /activity|product|tour|experience|title|name|offer/i,
-  bookings: /booking|order|sale(?!s amount)|conversion|qty|quantit|units?\b/i,
+  bookings: /^(?:bookings?|orders?|conversions?|qty|quantity|units?)$/i,
   revenue: /revenue|turnover|gmv|sales amount|booking value|gross|total value|order value/i,
-  commission: /commission|earning|payout|income|net|reward/i,
+  commission: /commission|earning|payout|income|reward/i,
   currency: /currency|ccy/i,
   clicks: /click/i,
+  order_id: /^(?:order|booking)\s*(?:id|reference|ref)$/i,
+  basket_id: /^basket\s*(?:id|reference|ref)$/i,
+  click_id: /^click\s*(?:id|reference|ref)$/i,
+  campaign: /campaign/i,
+  status: /^status$|order status|booking status/i,
+  visit_date: /^(?:visit|travel|activity)\s*date$/i,
 };
 function mapColumns(header) {
   const idx = {};
@@ -205,35 +239,190 @@ function normalizeDate(s) {
   const d = Date.parse(t);
   return Number.isNaN(d) ? '' : new Date(d).toISOString().slice(0, 10);
 }
-/** Parse a GYG-style CSV export into normalized conversion rows. */
-function parseConversionCsv(text, { provider, site }) {
+/** Parse partner portal CSV exports into order rows without guessing click attribution. */
+function parseConversionCsv(text, { provider, site, currency }) {
   const rows = parseCSV(text);
   if (rows.length < 2) return { rows: [], columns: {}, header: rows[0] || [] };
   const header = rows[0].map((h) => h.trim());
   const idx = mapColumns(header);
   const out = [];
+  const duplicates = new Map();
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     const get = (k) => (idx[k] != null ? r[idx[k]] : '');
-    const bookings = idx.bookings != null ? Math.round(parseNum(get('bookings'))) : 1;
+    const rawBookings = idx.bookings != null ? Math.round(parseNum(get('bookings'))) : 1;
     const revenue = parseNum(get('revenue'));
     const commission = idx.commission != null ? parseNum(get('commission')) : 0;
     const date = normalizeDate(get('date'));
     const product = (get('product') || '').trim();
-    if (!date && !product && !revenue && !commission) continue;
-    out.push({
-      date: date || new Date().toISOString().slice(0, 10),
+    if (!date || (!product && !revenue && !commission)) continue;
+    const status = (get('status') || '').trim().toLowerCase();
+    const orderId = (get('order_id') || '').trim();
+    const row = {
+      date,
       site: site || '',
-      provider: provider || 'getyourguide',
+      provider: (provider || 'getyourguide').trim().toLowerCase(),
       product,
-      bookings: bookings || (revenue || commission ? 1 : 0),
-      revenue, commission,
-      currency: (get('currency') || DEFAULT_CURRENCY).trim() || DEFAULT_CURRENCY,
-      imported_at: new Date().toISOString(),
-    });
+      bookings: /cancel|refund|revok/.test(status) ? 0 : rawBookings || (revenue || commission ? 1 : 0),
+      revenue: /cancel|refund|revok/.test(status) ? 0 : revenue,
+      commission: /cancel|refund|revok/.test(status) ? 0 : commission,
+      currency: (get('currency') || currency || DEFAULT_CURRENCY).trim() || DEFAULT_CURRENCY,
+      order_id: orderId,
+      basket_id: (get('basket_id') || '').trim(),
+      click_id: (get('click_id') || '').trim(),
+      campaign: (get('campaign') || '').trim(),
+      status,
+      visit_date: normalizeDate(get('visit_date')),
+      source: 'csv',
+    };
+    const fingerprint = createHash('sha256').update(JSON.stringify(row)).digest('hex').slice(0, 24);
+    const occurrence = duplicates.get(fingerprint) || 0;
+    duplicates.set(fingerprint, occurrence + 1);
+    row.import_key = orderId ? `${row.provider}:${orderId}` : `${row.provider}:csv:${fingerprint}:${occurrence}`;
+    out.push(row);
   }
   const matched = Object.fromEntries(Object.entries(idx).map(([k, i]) => [k, header[i]]));
   return { rows: out, columns: matched, header };
+}
+
+let conversionWrite = Promise.resolve();
+function upsertConversions(incoming) {
+  const work = conversionWrite.then(async () => {
+    const existing = await readConversions();
+    const byKey = new Map(existing.map((row, i) => [row.import_key || `legacy:${i}`, i]));
+    let added = 0, updated = 0;
+    for (const row of incoming) {
+      const i = byKey.get(row.import_key);
+      if (i == null) { byKey.set(row.import_key, existing.length); existing.push(row); added++; }
+      else if (JSON.stringify(existing[i]) !== JSON.stringify(row)) { existing[i] = row; updated++; }
+    }
+    // Coolify mounts this as a file; renaming over a bind mount fails with EBUSY.
+    await fsp.writeFile(CONV_FILE, existing.map((row) => JSON.stringify(row)).join('\n') + (existing.length ? '\n' : ''));
+    return { added, updated, total: existing.length };
+  });
+  conversionWrite = work.catch(() => {});
+  return work;
+}
+
+/* ───────────────────── Tiqets affiliate reporting ─────────────────── */
+const syncState = (() => {
+  try { return JSON.parse(fs.readFileSync(SYNC_FILE, 'utf8')); }
+  catch { return { tiqets: { lastSync: null, lastError: null } }; }
+})();
+let tiqetsSync = null;
+async function tiqetsReportWindow(kind, start, end) {
+  const all = [];
+  for (let page = 1; page <= 100; page++) {
+    const url = new URL(`${TIQETS_API_BASE_URL}/reports/${kind}`);
+    url.searchParams.set('start_date', start);
+    url.searchParams.set('end_date', end);
+    url.searchParams.set('page_size', '100');
+    url.searchParams.set('page', String(page));
+    const res = await fetch(url, {
+      headers: { Authorization: `Token ${tiqetsToken()}`, 'User-Agent': 'AffiliateDashboard/1.1' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`Tiqets ${kind} API returned ${res.status}`);
+    const body = await res.json();
+    const items = kind === 'refunds' ? (body.refunds || body.orders) : body.orders;
+    if (body.success === false || !Array.isArray(items)) throw new Error(`Unexpected Tiqets ${kind} response`);
+    all.push(...items);
+    const total = Number(body.pagination?.total || 0);
+    if (!items.length || all.length >= total) return all;
+  }
+  throw new Error(`Tiqets ${kind} pagination exceeded 100 pages`);
+}
+async function tiqetsReport(kind, start, end) {
+  const all = [];
+  let from = Date.parse(`${start}T00:00:00Z`);
+  const last = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(from) || !Number.isFinite(last)) throw new Error('Invalid Tiqets reporting dates');
+  while (from <= last) {
+    const through = Math.min(from + 29 * 86400000, last);
+    all.push(...await tiqetsReportWindow(kind, new Date(from).toISOString().slice(0, 10), new Date(through).toISOString().slice(0, 10)));
+    from = through + 86400000;
+  }
+  return all;
+}
+function tiqetsOrder(o) {
+  const orderId = String(o.order_reference_id || '').trim();
+  const date = normalizeDate(o.order_fulfilled_at || '');
+  if (!orderId || !date) return null;
+  const revenue = Number(o.sale_order_value_incl_vat) || 0;
+  const commission = Number(o.commission_excl_vat) || 0;
+  return {
+    import_key: `tiqets:${orderId}`, date, site: TIQETS_SITE, provider: 'tiqets',
+    product: String(o.product_name || o.product_title || o.product_id || ''),
+    bookings: 1, revenue, commission, gross_revenue: revenue, gross_commission: commission,
+    currency: o.currency || DEFAULT_CURRENCY,
+    order_id: orderId, basket_id: String(o.basket_reference_id || ''),
+    click_id: String(o.click_id || ''), campaign: String(o.campaign_name || ''),
+    status: 'fulfilled', visit_date: normalizeDate(o.visit_date || ''), source: 'tiqets_api',
+  };
+}
+async function saveSyncState() {
+  await fsp.writeFile(SYNC_FILE, JSON.stringify(syncState, null, 2));
+}
+function syncTiqets() {
+  if (!tiqetsToken()) return Promise.reject(new Error('Tiqets API token is not configured'));
+  if (tiqetsSync) return tiqetsSync;
+  tiqetsSync = (async () => {
+    const last = syncState.tiqets?.lastSync;
+    const rollingStart = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
+    const start = last ? rollingStart : TIQETS_SYNC_START_DATE;
+    const end = new Date().toISOString().slice(0, 10);
+    try {
+      const [raw, refunds, existing] = await Promise.all([
+        tiqetsReport('orders', start, end),
+        tiqetsReport('refunds', TIQETS_SYNC_START_DATE, end),
+        readConversions(),
+      ]);
+      const byOrder = new Map(existing.filter((r) => r.provider === 'tiqets' && r.source === 'tiqets_api' && r.order_id)
+        .map((r) => [r.order_id, { ...r }]));
+      for (const order of raw) {
+        const row = tiqetsOrder(order);
+        if (row) byOrder.set(row.order_id, row);
+      }
+      const refundByOrder = new Map();
+      for (const refund of refunds) {
+        const id = String(refund.order_reference_id || '');
+        if (!id) continue;
+        const total = refundByOrder.get(id) || { revenue: 0, commission: 0 };
+        total.revenue += Number(refund.sale_order_value_incl_vat) || 0;
+        total.commission += Number(refund.commission_excl_vat) || 0;
+        refundByOrder.set(id, total);
+      }
+      const rows = [...byOrder.values()];
+      for (const row of rows) {
+        const refund = refundByOrder.get(row.order_id);
+        const grossRevenue = row.gross_revenue ?? row.revenue;
+        const grossCommission = row.gross_commission ?? row.commission;
+        row.gross_revenue = grossRevenue;
+        row.gross_commission = grossCommission;
+        row.revenue = round2(Math.max(0, grossRevenue + (refund?.revenue || 0)));
+        row.commission = round2(Math.max(0, grossCommission + (refund?.commission || 0)));
+        row.status = refund ? (row.revenue > 0 ? 'partially_refunded' : 'refunded') : 'fulfilled';
+        row.bookings = row.status === 'refunded' ? 0 : 1;
+      }
+      const result = await upsertConversions(rows);
+      syncState.tiqets = { lastSync: new Date().toISOString(), lastError: null };
+      await saveSyncState();
+      return { ok: true, orders: rows.length, added: result.added, updated: result.updated };
+    } catch (e) {
+      syncState.tiqets = { ...syncState.tiqets, lastError: e.message };
+      await saveSyncState();
+      throw e;
+    }
+  })().finally(() => { tiqetsSync = null; });
+  return tiqetsSync;
+}
+async function syncStatus() {
+  const rows = await readConversions();
+  return { tiqets: {
+    configured: Boolean(tiqetsToken()), lastSync: syncState.tiqets?.lastSync || null,
+    lastError: syncState.tiqets?.lastError || null,
+    orders: rows.filter((r) => r.provider === 'tiqets').length,
+  } };
 }
 
 /* ───────────────────── GA4 measurement-protocol mirror ─────────────── */
@@ -293,20 +482,39 @@ function clickWindow(rows, fromT, toT, site) {
 /** Tally conversions within a window → totals + per-provider/day/product. */
 function convWindow(rows, fromT, toT, site) {
   let bookings = 0, revenue = 0, commission = 0; let currency = DEFAULT_CURRENCY;
-  const byDay = {}, byProvider = {}, byProduct = {}; const provRev = {}, provComm = {};
+  const byDay = {}, byProvider = {}, byProduct = {}; const provRev = {}, provComm = {}, provCurrency = {}, currencyTotals = {};
+  let rowCount = 0;
   for (const c of rows) {
     const t = Date.parse(c.date);
     if (Number.isNaN(t) || t < fromT || t >= toT) continue;
-    if (site && c.site && c.site !== site) continue;
+    if (site && c.site !== site) continue;
+    rowCount++;
     bookings += c.bookings || 0; revenue += c.revenue || 0; commission += c.commission || 0;
     if (c.currency) currency = c.currency;
+    const code = c.currency || DEFAULT_CURRENCY;
+    const bucket = currencyTotals[code] ||= { bookings: 0, revenue: 0, commission: 0 };
+    bucket.bookings += c.bookings || 0; bucket.revenue += c.revenue || 0; bucket.commission += c.commission || 0;
     inc(byDay, c.date, c.bookings || 0);
     inc(byProvider, c.provider || '(none)', c.bookings || 0);
     inc(provRev, c.provider || '(none)', c.revenue || 0);
     inc(provComm, c.provider || '(none)', c.commission || 0);
+    (provCurrency[c.provider || '(none)'] ||= new Set()).add(code);
     if (c.product) { inc(byProduct, c.product, c.bookings || 0); }
   }
-  return { bookings, revenue: round2(revenue), commission: round2(commission), currency, byDay, byProvider, byProduct, provRev, provComm };
+  for (const value of Object.values(currencyTotals)) { value.revenue = round2(value.revenue); value.commission = round2(value.commission); }
+  const providerCurrencies = Object.fromEntries(Object.entries(provCurrency).map(([key, codes]) => [key, codes.size === 1 ? [...codes][0] : null]));
+  return { bookings, revenue: round2(revenue), commission: round2(commission), currency, mixedCurrency: Object.keys(currencyTotals).length > 1,
+    currencyTotals, providerCurrencies, rowCount, byDay, byProvider, byProduct, provRev, provComm };
+}
+
+function linkConversions(clicks, conversions) {
+  const byId = new Map(clicks.filter((r) => r.click_id).map((r) => [r.click_id, r]));
+  return conversions.map((row) => {
+    const click = row.click_id && byId.get(row.click_id);
+    if (!click || click.provider !== row.provider) return { ...row, attribution_status: 'unlinked' };
+    return { ...row, site: row.site || click.site, attribution_status: 'exact',
+      click: { ts: click.ts, source_page: click.source_page, campaign: click.campaign, gclid: click.gclid } };
+  });
 }
 
 function aggregate(clicks, conversions, { from, to, site, includeBots } = {}) {
@@ -345,7 +553,7 @@ function aggregate(clicks, conversions, { from, to, site, includeBots } = {}) {
   const cw = convWindow(conversions, fromT, toT, site);
   const pcw = spanFinite ? convWindow(conversions, prevFromT, prevToT, site) : null;
   const prevClk = spanFinite ? clickWindow(clicks, prevFromT, prevToT, site) : null;
-  const hasConversions = conversions.length > 0;
+  const hasConversions = cw.rowCount > 0;
 
   // day series merging clicks + conversions + revenue
   const allDays = new Set([...Object.keys(byDayClicks), ...Object.keys(cw.byDay)]);
@@ -357,7 +565,8 @@ function aggregate(clicks, conversions, { from, to, site, includeBots } = {}) {
     const c = m.provider[k] || 0; const conv = cw.byProvider[k] || 0;
     const comm = round2(cw.provComm[k] || 0); const rev = round2(cw.provRev[k] || 0);
     return { key: k, clicks: c, conversions: conv, revenue: rev, commission: comm,
-      epc: c ? round2(comm / c) : 0, cr: c ? round2((conv / c) * 100) : 0 };
+      epc: c ? round2(comm / c) : 0, cr: c ? round2((conv / c) * 100) : 0,
+      currency: cw.providerCurrencies[k], mixedCurrency: cw.provRev[k] != null && !cw.providerCurrencies[k] };
   }).sort((a, b) => b.clicks - a.clicks);
 
   const mk = (v, prev) => ({ v: round2(v), prev: prev == null ? null : round2(prev), delta: prev == null ? null : pct(v, prev) });
@@ -385,7 +594,7 @@ function aggregate(clicks, conversions, { from, to, site, includeBots } = {}) {
 
   return {
     range: { from: spanFinite ? from : null, to: to || null, days: spanFinite ? Math.round(span / 86400000) : 0 },
-    hasConversions, currency: cw.currency,
+    hasConversions, currency: cw.currency, mixedCurrency: cw.mixedCurrency, currencyTotals: cw.currencyTotals,
     kpis,
     byDay,
     byHour: Array.from({ length: 24 }, (_, i) => { const k = String(i).padStart(2, '0'); return { key: k, count: byHour[k] || 0 }; }),
@@ -395,6 +604,13 @@ function aggregate(clicks, conversions, { from, to, site, includeBots } = {}) {
     pages: topN(m.page), sources: topN(m.source),
     devices: topN(m.device), browsers: topN(m.browser), os: topN(m.os), geo: topN(m.geo), languages: topN(m.lang),
     insights, recent: recent.slice(0, 150),
+    bookings: conversions.filter((c) => {
+      const t = Date.parse(c.date); return t >= fromT && t < toT && (!site || c.site === site);
+    }).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 100),
+    attribution: {
+      exactLinked: conversions.filter((c) => c.attribution_status === 'exact' && Date.parse(c.date) >= fromT && Date.parse(c.date) < toT && (!site || c.site === site)).length,
+      count: cw.rowCount,
+    },
   };
 }
 
@@ -404,21 +620,10 @@ function buildInsights({ total, bots, visitors, byHour, heat, m, providers, hasC
   if (!total) { out.push({ severity: 'info', title: 'No clicks yet', text: 'Once your affiliate links get traffic, performance cues will appear here.' }); return out; }
   const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-  // conversion rate vs industry benchmark (1–5%)
   if (hasConversions) {
-    if (cr >= 5) out.push({ severity: 'good', title: `Conversion rate ${cr.toFixed(1)}%`, text: 'Above the 5% top-quartile benchmark — your traffic is high-intent. Scale the sources feeding it.' });
-    else if (cr >= 1) out.push({ severity: 'info', title: `Conversion rate ${cr.toFixed(1)}%`, text: 'Within the healthy 1–5% range. Push toward 5%+ by tightening landing-page → product match.' });
-    else out.push({ severity: 'warn', title: `Conversion rate ${cr.toFixed(1)}%`, text: 'Below the 1% benchmark. Check that links point to the most relevant product and that pages set expectations.' });
-
-    // best & leaking provider by EPC / clicks-without-conversions
-    const withClicks = providers.filter((p) => p.clicks > 0);
-    const best = withClicks.filter((p) => p.epc > 0).sort((a, b) => b.epc - a.epc)[0];
-    if (best) out.push({ severity: 'good', title: `Best EPC: ${best.key}`, text: `${currency} ${best.epc.toFixed(2)} per click. Send more traffic here — it earns the most per click.` });
-    const median = withClicks.map((p) => p.clicks).sort((a, b) => a - b)[Math.floor(withClicks.length / 2)] || 0;
-    const leak = withClicks.filter((p) => p.conversions === 0 && p.clicks >= Math.max(5, median)).sort((a, b) => b.clicks - a.clicks)[0];
-    if (leak) out.push({ severity: 'bad', title: `Leak: ${leak.key}`, text: `${leak.clicks} clicks, 0 conversions in range. Re-check the destination link/product or the page's promise.` });
+    out.push({ severity: 'info', title: 'Bookings added', text: 'Partner orders are shown beside your tracked clicks. Exact attribution is shown only when an order includes a matching click ID.' });
   } else {
-    out.push({ severity: 'info', title: 'Add revenue data', text: 'Import your GetYourGuide CSV export to unlock EPC, conversion rate, revenue & ROI (GYG has no click API).' });
+    out.push({ severity: 'info', title: 'Connect order data', text: 'Tiqets can sync through its reporting API. GetYourGuide and Headout reports can be imported when available.' });
   }
 
   // best window from heatmap
@@ -462,8 +667,40 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const origin = req.headers['origin'] || '';
   const corsOk = ALLOWED_ORIGINS.includes(origin);
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
   try {
     if (url.pathname === '/health') { res.writeHead(200); return res.end('ok'); }
+
+    if (url.pathname === '/login' && req.method === 'GET') {
+      if (authed(req)) { res.writeHead(303, { location: '/' }); return res.end(); }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(LOGIN_HTML);
+    }
+    if (url.pathname === '/login' && req.method === 'POST') {
+      if (!sameOrigin(req)) { res.writeHead(403); return res.end('forbidden'); }
+      const ip = req.socket.remoteAddress || 'unknown';
+      const failure = loginFailures.get(ip) || { count: 0, until: 0 };
+      if (failure.until > Date.now()) { res.writeHead(429); return res.end('Too many attempts. Try again later.'); }
+      const form = new URLSearchParams(await readBody(req));
+      if (!ADMIN_PASS || !eq(form.get('username') || '', ADMIN_USER) || !eq(form.get('password') || '', ADMIN_PASS)) {
+        failure.count = failure.until && failure.until < Date.now() ? 1 : failure.count + 1;
+        failure.until = failure.count >= 8 ? Date.now() + 15 * 60000 : 0;
+        loginFailures.set(ip, failure);
+        res.writeHead(303, { location: '/login?error=1' }); return res.end();
+      }
+      loginFailures.delete(ip);
+      const token = randomBytes(32).toString('base64url');
+      sessions.set(token, Date.now() + SESSION_MS);
+      res.writeHead(303, { location: '/', 'set-cookie': sessionCookie(req, token, Math.floor(SESSION_MS / 1000)), 'cache-control': 'no-store' });
+      return res.end();
+    }
+    if (url.pathname === '/logout' && req.method === 'POST') {
+      if (!sameOrigin(req)) { res.writeHead(403); return res.end('forbidden'); }
+      sessions.delete(cookie(req, SESSION_COOKIE));
+      res.writeHead(303, { location: '/login', 'set-cookie': sessionCookie(req, '', 0), 'cache-control': 'no-store' });
+      return res.end();
+    }
 
     if (url.pathname === '/collect' && req.method === 'OPTIONS') {
       res.writeHead(corsOk ? 204 : 403, corsOk ? { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' } : {});
@@ -478,6 +715,18 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(204); return res.end();
     }
 
+    if (req.method === 'POST' && !sameOrigin(req)) { res.writeHead(403); return res.end('forbidden'); }
+
+    if (url.pathname === '/api/sync/status' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
+      return json(res, 200, await syncStatus());
+    }
+    if (url.pathname === '/api/sync/tiqets' && req.method === 'POST') {
+      if (!requireAuth(req, res)) return;
+      try { return json(res, 200, await syncTiqets()); }
+      catch (e) { return json(res, 502, { ok: false, error: e.message }); }
+    }
+
     if (url.pathname === '/api/reset' && req.method === 'POST') {
       if (!requireAuth(req, res)) return;
       await fsp.writeFile(DATA_FILE, '');
@@ -490,15 +739,16 @@ const server = http.createServer(async (req, res) => {
       if (!requireAuth(req, res)) return;
       const provider = url.searchParams.get('provider') || 'getyourguide';
       const site = url.searchParams.get('site') || '';
+      const currency = url.searchParams.get('currency') || '';
       const dryRun = url.searchParams.get('dryRun') === '1';
       const text = await readBody(req);
-      const parsed = parseConversionCsv(text, { provider, site });
+      const parsed = parseConversionCsv(text, { provider, site, currency });
       if (!parsed.rows.length) return json(res, 400, { ok: false, error: 'No rows parsed. Check the CSV has a header row with date/product/bookings/revenue/commission columns.', header: parsed.header });
       const totals = parsed.rows.reduce((a, r) => ({ bookings: a.bookings + r.bookings, revenue: a.revenue + r.revenue, commission: a.commission + r.commission }), { bookings: 0, revenue: 0, commission: 0 });
       if (dryRun) return json(res, 200, { ok: true, dryRun: true, count: parsed.rows.length, columns: parsed.columns, header: parsed.header, totals: { bookings: totals.bookings, revenue: round2(totals.revenue), commission: round2(totals.commission) }, currency: parsed.rows[0].currency, sample: parsed.rows.slice(0, 8) });
-      await fsp.appendFile(CONV_FILE, parsed.rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+      const saved = await upsertConversions(parsed.rows);
       const mirrored = GA4_ON ? mirrorToGA4(parsed.rows) : 0;
-      return json(res, 200, { ok: true, count: parsed.rows.length, columns: parsed.columns, mirroredToGA4: mirrored, totals: { bookings: totals.bookings, revenue: round2(totals.revenue), commission: round2(totals.commission) } });
+      return json(res, 200, { ok: true, count: parsed.rows.length, added: saved.added, updated: saved.updated, columns: parsed.columns, mirroredToGA4: mirrored, totals: { bookings: totals.bookings, revenue: round2(totals.revenue), commission: round2(totals.commission) } });
     }
 
     if (url.pathname === '/api/config') {
@@ -520,7 +770,8 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/stats') {
       if (!requireAuth(req, res)) return;
-      const [clicks, conversions, config] = await Promise.all([readClicks(), readConversions(), readConfig()]);
+      const [clicks, rawConversions, config] = await Promise.all([readClicks(), readConversions(), readConfig()]);
+      const conversions = linkConversions(clicks, rawConversions);
       const data = aggregate(clicks, conversions, {
         from: url.searchParams.get('from') || undefined,
         to: url.searchParams.get('to') || undefined,
@@ -537,14 +788,19 @@ const server = http.createServer(async (req, res) => {
         revenue: { target: config.goalRevenue || 0, current: round2(mConv.commission || mConv.revenue), pct: config.goalRevenue ? Math.min(100, Math.round(((mConv.commission || mConv.revenue) / config.goalRevenue) * 100)) : null },
       };
       data.gaMirror = GA4_ON;
+      data.sync = await syncStatus();
       return json(res, 200, data);
     }
 
     if (url.pathname === '/') {
-      if (!requireAuth(req, res)) return;
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(DASHBOARD_HTML);
+      if (!authed(req)) { res.writeHead(303, { location: '/login' }); return res.end(); }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(DASHBOARD_HTML);
     }
     res.writeHead(404); res.end('not found');
   } catch (e) { res.writeHead(500); res.end('error'); }
 });
 server.listen(PORT, () => console.log(`affiliate-dashboard on :${PORT} (data dir: ${DATA_DIR}, GA4 mirror: ${GA4_ON ? 'on' : 'off'})`));
+if (tiqetsToken()) {
+  syncTiqets().catch((e) => console.error('Tiqets sync:', e.message));
+  setInterval(() => syncTiqets().catch((e) => console.error('Tiqets sync:', e.message)), 15 * 60000).unref();
+}

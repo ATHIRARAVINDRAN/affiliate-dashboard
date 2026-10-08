@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Centralized affiliate click dashboard — one place to view stats across every site. Basic-auth protected.",
+  "description": "Affiliate click and booking dashboard with session login and partner reporting sync.",
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test"
   }
 }
