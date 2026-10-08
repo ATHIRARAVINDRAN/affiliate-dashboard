@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,10 @@ async function freePort() {
 
 async function startDashboard(t, overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'affiliate-dashboard-test-'));
+  if (overrides.SEED_CLICKS) {
+    await writeFile(path.join(dir, 'clicks.ndjson'), overrides.SEED_CLICKS);
+    overrides = { ...overrides }; delete overrides.SEED_CLICKS;
+  }
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [serverPath], {
@@ -253,4 +257,45 @@ test('Tiqets sync paginates orders, applies refunds, and remains idempotent', as
   assert.equal(refunded.revenue, 70);
   assert.equal(refunded.commission, 7);
   assert.equal(refunded.attribution_status, 'exact');
+});
+
+test('authenticated exports preserve click joins, braid IDs and unknown consent; Tiqets timestamps stay raw', async (t) => {
+  const { base } = await startDashboard(t);
+  assert.equal((await fetch(`${base}/api/export?type=clicks`)).status, 401);
+  await fetch(`${base}/collect`, { method: 'POST',
+    headers: { 'x-ingest-token': 'test-ingest-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ click_id: 'join-1', site: 'example.test', affiliate_provider: 'tiqets',
+      gclid: 'Exact-Case_123', gbraid: 'Braid_123', wbraid: 'Web_456' }),
+  });
+  const cookie = await login(base);
+  const exported = await fetch(`${base}/api/export?type=clicks`, { headers: { cookie } });
+  assert.equal(exported.headers.get('cache-control'), 'no-store');
+  const csv = await exported.text();
+  assert.match(csv, /ts,click_id,site/);
+  assert.match(csv, /join-1/);
+  assert.match(csv, /Exact-Case_123,Braid_123,Web_456,UNKNOWN,UNKNOWN/);
+  const imported = await jsonResponse(base, '/api/import?provider=tiqets&site=example.test&currency=USD', {
+    method: 'POST', headers: { cookie, origin: base, 'content-type': 'text/csv' },
+    body: '\uFEFFStatus,Product Title,Ordered At,Refund Date,Commission,Order Value,Order ID,Basket ID,Click ID\nfulfilled,Train,"October 7, 2026, 14:45:24",,$ 1.17,$ 8.18,o1,b1,join-1\n',
+  });
+  assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.added, 1);
+  const orders = await (await fetch(`${base}/api/export?type=conversions`, { headers: { cookie } })).text();
+  assert.match(orders, /ordered_at,refund_date/);
+  assert.match(orders, /"October 7, 2026, 14:45:24"/);
+  assert.match(orders, /o1,b1,join-1/);
+});
+
+
+test('retention removes expired ad IDs on disk and from exports while retaining click/commission join keys', async (t) => {
+  const seed = { ts: '2020-01-01T00:00:00Z', click_id: 'historic-join', site: 'example.test',
+    provider: 'tiqets', gclid: 'OldGoogleId', gbraid: 'OldBraid', wbraid: 'OldWebBraid', fbclid: 'OldFacebookId' };
+  const { base, dir } = await startDashboard(t, { SEED_CLICKS: JSON.stringify(seed) + '\n' });
+  const persisted = JSON.parse((await readFile(path.join(dir, 'clicks.ndjson'), 'utf8')).trim());
+  assert.equal(persisted.click_id, 'historic-join');
+  for (const key of ['gclid', 'gbraid', 'wbraid', 'fbclid']) assert.equal(persisted[key], '');
+  const cookie = await login(base);
+  const exported = await (await fetch(`${base}/api/export?type=clicks`, { headers: { cookie } })).text();
+  assert.match(exported, /historic-join/);
+  assert.doesNotMatch(exported, /OldGoogleId|OldBraid|OldWebBraid|OldFacebookId/);
 });

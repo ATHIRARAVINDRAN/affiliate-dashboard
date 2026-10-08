@@ -34,6 +34,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) =
 const DATA_FILE = process.env.DATA_FILE || path.join(process.cwd(), 'data', 'clicks.ndjson');
 const DATA_DIR = path.dirname(DATA_FILE);
 const CONV_FILE = path.join(DATA_DIR, 'conversions.ndjson');
+const AD_CLICK_RETENTION_DAYS = Math.max(1, Math.min(90, Number(process.env.AD_CLICK_RETENTION_DAYS) || 90));
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const GA4_MEASUREMENT_ID = process.env.GA4_MEASUREMENT_ID || '';
 const GA4_API_SECRET = process.env.GA4_API_SECRET || '';
@@ -122,6 +123,48 @@ function parseUA(ua) {
 }
 
 /* ─────────────────────────── click ingestion ──────────────────────── */
+// Serialize retention rewrites with ingestion so a new click cannot be lost.
+let clickWrite = Promise.resolve();
+function writeClicks(work) {
+  const result = clickWrite.then(work);
+  clickWrite = result.catch(() => {});
+  return result;
+}
+function redactExpiredAdIds(row) {
+  if (Date.parse(row.ts) >= Date.now() - AD_CLICK_RETENTION_DAYS * 86400000) return row;
+  const safe = { ...row, gclid: '', gbraid: '', wbraid: '', fbclid: '' };
+  for (const key of ['source_page', 'link_url']) {
+    if (!row[key]) continue;
+    try {
+      const url = new URL(row[key]);
+      for (const id of ['gclid', 'gbraid', 'wbraid', 'fbclid']) url.searchParams.delete(id);
+      safe[key] = url.toString();
+    } catch { /* Existing fields are normally absolute URLs. */ }
+  }
+  return safe;
+}
+function purgeExpiredAdIds() {
+  return writeClicks(async () => {
+    let raw;
+    try { raw = await fsp.readFile(DATA_FILE, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    let changed = false;
+    const redacted = raw.split('\n').map((line) => {
+      try {
+        const row = JSON.parse(line);
+        const safe = redactExpiredAdIds(row);
+        if (safe !== row && (['gclid', 'gbraid', 'wbraid', 'fbclid'].some((key) => row[key])
+          || safe.source_page !== row.source_page || safe.link_url !== row.link_url)) {
+          changed = true; return JSON.stringify(safe);
+        }
+      } catch { /* Preserve any unparseable historical line verbatim. */ }
+      return line;
+    }).join('\n');
+    if (changed) {
+      await fsp.writeFile(DATA_FILE + '.retention.tmp', redacted, { mode: 0o600 });
+      await fsp.rename(DATA_FILE + '.retention.tmp', DATA_FILE);
+    }
+  });
+}
 async function appendClick(ev, req) {
   const ua = req.headers['user-agent'] || '';
   const fromUA = parseUA(ua);
@@ -140,7 +183,11 @@ async function appendClick(ev, req) {
     campaign: ev.campaign || '',
     term: ev.term || '',
     content: ev.content || '',
-    gclid: ev.gclid || '',
+    gclid: typeof ev.gclid === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(ev.gclid) ? ev.gclid : '',
+    gbraid: typeof ev.gbraid === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(ev.gbraid) ? ev.gbraid : '',
+    wbraid: typeof ev.wbraid === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(ev.wbraid) ? ev.wbraid : '',
+    ad_user_data: ['GRANTED', 'DENIED'].includes(ev.ad_user_data) ? ev.ad_user_data : 'UNKNOWN',
+    ad_personalization: ['GRANTED', 'DENIED'].includes(ev.ad_personalization) ? ev.ad_personalization : 'UNKNOWN',
     fbclid: ev.fbclid || '',
     geo: ev.geo_country || ev.geo || req.headers['cf-ipcountry'] || '',
     device: ev.device || fromUA.device,
@@ -150,7 +197,7 @@ async function appendClick(ev, req) {
     visitor: ev.visitor_id || ev.visitor || (ip ? 'ip:' + ip : ''),
     is_bot: ev.is_bot != null ? Number(ev.is_bot) : (fromUA.bot ? 1 : 0),
   };
-  await fsp.appendFile(DATA_FILE, JSON.stringify(row) + '\n');
+  await writeClicks(() => fsp.appendFile(DATA_FILE, JSON.stringify(row) + '\n', { mode: 0o600 }));
   return row;
 }
 async function readNdjson(file) {
@@ -160,7 +207,7 @@ async function readNdjson(file) {
   for (const line of raw.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch {} }
   return out;
 }
-const readClicks = () => readNdjson(DATA_FILE);
+const readClicks = async () => (await readNdjson(DATA_FILE)).map(redactExpiredAdIds);
 const readConversions = () => readNdjson(CONV_FILE);
 
 async function readConfig() {
@@ -206,7 +253,9 @@ function parseNum(s) {
   return Number.isFinite(n) ? n : 0;
 }
 const COLMAP = {
-  date: /^(?:order|booking|checkout)?\s*date$|^day$|^period$/i,
+  date: /^(?:order|booking|checkout)?\s*date$|^ordered at$|^day$|^period$/i,
+  ordered_at: /^ordered at$|^order date$/i,
+  refund_date: /^refund date$/i,
   product: /activity|product|tour|experience|title|name|offer/i,
   bookings: /^(?:bookings?|orders?|conversions?|qty|quantity|units?)$/i,
   revenue: /revenue|turnover|gmv|sales amount|booking value|gross|total value|order value/i,
@@ -262,6 +311,8 @@ function parseConversionCsv(text, { provider, site, currency }) {
     const orderId = (get('order_id') || '').trim();
     const row = {
       date,
+      ordered_at: (get('ordered_at') || '').trim(),
+      refund_date: (get('refund_date') || '').trim(),
       site: site || '',
       provider: (provider || 'getyourguide').trim().toLowerCase(),
       product,
@@ -731,7 +782,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/reset' && req.method === 'POST') {
       if (!requireAuth(req, res)) return;
-      await fsp.writeFile(DATA_FILE, '');
+      await writeClicks(() => fsp.writeFile(DATA_FILE, ''));
       const what = url.searchParams.get('what') || 'all';
       if (what === 'all' || what === 'conversions') { try { await fsp.writeFile(CONV_FILE, ''); } catch {} }
       return json(res, 200, { ok: true });
@@ -764,9 +815,9 @@ const server = http.createServer(async (req, res) => {
       const type = url.searchParams.get('type') || 'clicks';
       const rows = type === 'conversions' ? await readConversions() : await readClicks();
       const cols = type === 'conversions'
-        ? ['date', 'site', 'provider', 'product', 'bookings', 'revenue', 'commission', 'currency']
-        : ['ts', 'site', 'provider', 'product', 'source_page', 'source', 'campaign', 'device', 'browser', 'os', 'geo', 'language', 'visitor', 'is_bot'];
-      res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${type}.csv"` });
+        ? ['date', 'ordered_at', 'refund_date', 'site', 'provider', 'product', 'bookings', 'revenue', 'commission', 'currency', 'order_id', 'basket_id', 'click_id', 'campaign', 'status']
+        : ['ts', 'click_id', 'site', 'provider', 'product', 'source_page', 'source', 'campaign', 'gclid', 'gbraid', 'wbraid', 'ad_user_data', 'ad_personalization', 'device', 'browser', 'os', 'geo', 'language', 'visitor', 'is_bot'];
+      res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'cache-control': 'no-store', 'content-disposition': `attachment; filename="${type}.csv"` });
       return res.end(toCSV(rows, cols));
     }
 
@@ -801,6 +852,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404); res.end('not found');
   } catch (e) { res.writeHead(500); res.end('error'); }
 });
+await purgeExpiredAdIds();
+setInterval(() => purgeExpiredAdIds().catch(() => console.error('Ad click ID retention cleanup failed')), 86400000).unref();
 server.listen(PORT, () => console.log(`affiliate-dashboard on :${PORT} (data dir: ${DATA_DIR}, GA4 mirror: ${GA4_ON ? 'on' : 'off'})`));
 if (tiqetsToken()) {
   syncTiqets().catch((e) => console.error('Tiqets sync:', e.message));
