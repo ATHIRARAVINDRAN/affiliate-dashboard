@@ -160,8 +160,14 @@ function purgeExpiredAdIds() {
       return line;
     }).join('\n');
     if (changed) {
-      await fsp.writeFile(DATA_FILE + '.retention.tmp', redacted, { mode: 0o600 });
-      await fsp.rename(DATA_FILE + '.retention.tmp', DATA_FILE);
+      // Coolify mounts this file individually. Replacing its inode with rename
+      // fails EBUSY on a bind mount; rewrite it under the same ingestion/read lock.
+      const file = await fsp.open(DATA_FILE, 'r+');
+      try {
+        await file.writeFile(redacted);
+        await file.truncate(Buffer.byteLength(redacted));
+        await file.sync();
+      } finally { await file.close(); }
     }
   });
 }
@@ -207,7 +213,7 @@ async function readNdjson(file) {
   for (const line of raw.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch {} }
   return out;
 }
-const readClicks = async () => (await readNdjson(DATA_FILE)).map(redactExpiredAdIds);
+const readClicks = () => writeClicks(async () => (await readNdjson(DATA_FILE)).map(redactExpiredAdIds));
 const readConversions = () => readNdjson(CONV_FILE);
 
 async function readConfig() {

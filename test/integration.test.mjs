@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -24,8 +24,10 @@ async function freePort() {
 
 async function startDashboard(t, overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'affiliate-dashboard-test-'));
+  let seedInode;
   if (overrides.SEED_CLICKS) {
     await writeFile(path.join(dir, 'clicks.ndjson'), overrides.SEED_CLICKS);
+    seedInode = (await stat(path.join(dir, 'clicks.ndjson'))).ino;
     overrides = { ...overrides }; delete overrides.SEED_CLICKS;
   }
   const port = await freePort();
@@ -57,7 +59,7 @@ async function startDashboard(t, overrides = {}) {
     if (child.exitCode !== null) throw new Error(`Dashboard exited during startup: ${stderr}`);
     try {
       const response = await fetch(`${base}/health`);
-      if (response.ok) return { base, dir };
+      if (response.ok) return { base, dir, seedInode };
     } catch {}
     await delay(50);
   }
@@ -287,10 +289,11 @@ test('authenticated exports preserve click joins, braid IDs and unknown consent;
 });
 
 
-test('retention removes expired ad IDs on disk and from exports while retaining click/commission join keys', async (t) => {
+test('retention rewrites the existing inode for bind-file mounts and keeps click/commission join keys', async (t) => {
   const seed = { ts: '2020-01-01T00:00:00Z', click_id: 'historic-join', site: 'example.test',
     provider: 'tiqets', gclid: 'OldGoogleId', gbraid: 'OldBraid', wbraid: 'OldWebBraid', fbclid: 'OldFacebookId' };
-  const { base, dir } = await startDashboard(t, { SEED_CLICKS: JSON.stringify(seed) + '\n' });
+  const { base, dir, seedInode } = await startDashboard(t, { SEED_CLICKS: JSON.stringify(seed) + '\n' });
+  assert.equal((await stat(path.join(dir, 'clicks.ndjson'))).ino, seedInode);
   const persisted = JSON.parse((await readFile(path.join(dir, 'clicks.ndjson'), 'utf8')).trim());
   assert.equal(persisted.click_id, 'historic-join');
   for (const key of ['gclid', 'gbraid', 'wbraid', 'fbclid']) assert.equal(persisted[key], '');
